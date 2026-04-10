@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"syscall"
 	"unsafe"
@@ -14,8 +15,6 @@ const (
 	btprotoRFCOMM = 3
 	rfcommChannel = 15
 )
-
-var deviceAddr = [6]byte{0x42, 0x13, 0x09, 0xEB, 0xBE, 0x2C} // 2C:BE:EB:09:13:42 reversed
 
 var commands = map[string][]byte{
 	"transparency": mustHex("5560010ff00300cb010700c5af"),
@@ -39,6 +38,46 @@ type sockaddrRC struct {
 	channel uint8
 }
 
+func findDevice() ([6]byte, error) {
+	out, err := exec.Command("bluetoothctl", "devices", "Paired").Output()
+	if err != nil {
+		return [6]byte{}, fmt.Errorf("bluetoothctl: %w", err)
+	}
+
+	for _, line := range strings.Split(string(out), "\n") {
+		// Format: "Device AA:BB:CC:DD:EE:FF Nothing ear (1)"
+		if !strings.Contains(line, "Nothing ear") {
+			continue
+		}
+
+		parts := strings.Fields(line)
+		if len(parts) < 3 {
+			continue
+		}
+
+		return parseMAC(parts[1])
+	}
+
+	return [6]byte{}, fmt.Errorf("no Nothing ear device found (is it paired?)")
+}
+
+func parseMAC(mac string) ([6]byte, error) {
+	var addr [6]byte
+	parts := strings.Split(mac, ":")
+	if len(parts) != 6 {
+		return addr, fmt.Errorf("invalid MAC: %s", mac)
+	}
+	for i, p := range parts {
+		b, err := hex.DecodeString(p)
+		if err != nil {
+			return addr, fmt.Errorf("invalid MAC: %s", mac)
+		}
+		// Reverse order for Linux sockaddr_rc
+		addr[5-i] = b[0]
+	}
+	return addr, nil
+}
+
 func mustHex(s string) []byte {
 	b, err := hex.DecodeString(s)
 	if err != nil {
@@ -48,6 +87,11 @@ func mustHex(s string) []byte {
 }
 
 func connect() (int, error) {
+	deviceAddr, err := findDevice()
+	if err != nil {
+		return -1, err
+	}
+
 	fd, err := syscall.Socket(afBluetooth, syscall.SOCK_STREAM, btprotoRFCOMM)
 	if err != nil {
 		return -1, fmt.Errorf("socket: %w", err)
